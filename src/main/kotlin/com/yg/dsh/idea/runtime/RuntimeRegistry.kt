@@ -6,39 +6,32 @@ import com.intellij.openapi.components.Service
 import com.intellij.openapi.diagnostic.Logger
 import java.util.concurrent.ConcurrentHashMap
 
+/**
+ * Tracks live DSH runtimes (one per project). There is no concurrency cap:
+ * every open project may run its own DSH instance; the registry only keeps
+ * track of them for lifecycle cleanup and diagnostics.
+ */
 @Service(Service.Level.APP)
 class RuntimeRegistry : Disposable {
 
     private val running = ConcurrentHashMap<String, Any>()
 
-    /**
-     * Concurrency cap, synced from Settings → Advanced before each acquire.
-     * The registry itself stays settings-agnostic (usable in pure-JVM tests).
-     */
-    @Volatile
-    var maxInstances: Int = DEFAULT_MAX_INSTANCES
-
     companion object {
         private val LOG = Logger.getInstance(RuntimeRegistry::class.java)
-
-        /** Fallback cap when settings have not been synced yet. */
-        const val DEFAULT_MAX_INSTANCES = 3
 
         fun getInstance(): RuntimeRegistry =
             ApplicationManager.getApplication().getService(RuntimeRegistry::class.java)
     }
 
-    fun tryAcquire(projectName: String, handle: Any): Boolean {
-        val limit = maxInstances.coerceAtLeast(1)
-        val current = running.putIfAbsent(projectName, handle)
-        if (current != null) return true
-        if (running.size > limit) {
-            running.remove(projectName)
-            LOG.warn("DSH instance limit reached ($limit); rejected $projectName")
-            return false
+    /**
+     * Registers a running instance for [projectName]. Idempotent: re-registering
+     * the same project (e.g. a restarted panel) keeps the existing entry.
+     */
+    fun register(projectName: String, handle: Any) {
+        val previous = running.putIfAbsent(projectName, handle)
+        if (previous == null) {
+            LOG.info("DSH instance registered: $projectName (total=${running.size})")
         }
-        LOG.info("DSH instance registered: $projectName (total=${running.size})")
-        return true
     }
 
     fun release(projectName: String) {

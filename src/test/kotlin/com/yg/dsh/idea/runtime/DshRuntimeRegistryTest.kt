@@ -6,38 +6,35 @@ import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 
 /**
- * 并发上限逻辑测试（Step 5 FR-02.6）。
+ * 运行实例登记逻辑测试。
  * 注：RuntimeRegistry 是 applicationService，需要 Application 实例；
- * 此处直接实例化以测试名额登记/释放/超限语义。
+ * 此处直接实例化以测试登记/释放语义（已无并发上限）。
  */
 class RuntimeRegistryTest {
 
     @Test
-    fun `acquire up to limit then reject`() {
+    fun `register any number of projects`() {
         val registry = RuntimeRegistry()
         val handle = Any()
-        // 注册前 3 个项目
-        assertTrue(registry.tryAcquire("proj-1", handle))
-        assertTrue(registry.tryAcquire("proj-2", handle))
-        assertTrue(registry.tryAcquire("proj-3", handle))
-        assertEquals(3, registry.runningCount())
-        // 第 4 个被拒绝
-        assertFalse(registry.tryAcquire("proj-4", handle))
-        assertEquals(3, registry.runningCount())
-        assertFalse(registry.isRunning("proj-4"))
+        registry.register("proj-1", handle)
+        registry.register("proj-2", handle)
+        registry.register("proj-3", handle)
+        registry.register("proj-4", handle)
+        assertEquals(4, registry.runningCount())
+        assertTrue(registry.isRunning("proj-4"))
     }
 
     @Test
-    fun `release frees a slot`() {
+    fun `release removes a registration`() {
         val registry = RuntimeRegistry()
         val handle = Any()
-        registry.tryAcquire("a", handle)
-        registry.tryAcquire("b", handle)
+        registry.register("a", handle)
+        registry.register("b", handle)
         registry.release("a")
         assertEquals(1, registry.runningCount())
         assertFalse(registry.isRunning("a"))
         // 释放后可再登记新项目
-        assertTrue(registry.tryAcquire("c", handle))
+        registry.register("c", handle)
         assertEquals(2, registry.runningCount())
     }
 
@@ -45,24 +42,10 @@ class RuntimeRegistryTest {
     fun `same project is idempotent`() {
         val registry = RuntimeRegistry()
         val handle = Any()
-        assertTrue(registry.tryAcquire("dup", handle))
-        assertTrue(registry.tryAcquire("dup", handle)) // 幂等：已有实例
+        registry.register("dup", handle)
+        registry.register("dup", handle) // 幂等：已有实例
         assertEquals(1, registry.runningCount())
         registry.release("dup")
         assertEquals(0, registry.runningCount())
-    }
-
-    @Test
-    fun `configurable limit is respected`() {
-        val registry = RuntimeRegistry()
-        registry.maxInstances = 2
-        val handle = Any()
-        assertTrue(registry.tryAcquire("p1", handle))
-        assertTrue(registry.tryAcquire("p2", handle))
-        assertEquals(2, registry.runningCount())
-        // 第 3 个项目超出用户配置的上限
-        assertFalse(registry.tryAcquire("p3", handle))
-        assertEquals(2, registry.runningCount())
-        assertFalse(registry.isRunning("p3"))
     }
 }

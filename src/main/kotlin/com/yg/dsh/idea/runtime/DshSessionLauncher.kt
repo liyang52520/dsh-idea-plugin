@@ -21,7 +21,7 @@ class DshSession(
  * ensureHome → MCP patch → 凭据 → 进程。
  *
  * 同步执行且包含文件 IO，必须在 pooled thread 上调用。任一步骤失败即抛出，
- * 由调用方负责错误呈现与并发配额（RuntimeRegistry）回滚。
+ * 由调用方负责错误呈现与实例登记（RuntimeRegistry）回滚。
  */
 class DshSessionLauncher(private val project: Project) {
 

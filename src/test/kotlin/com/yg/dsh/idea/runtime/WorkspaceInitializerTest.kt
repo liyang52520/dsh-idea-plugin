@@ -1,9 +1,8 @@
 package com.yg.dsh.idea.runtime
 
+import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.Assertions.assertEquals
-import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import java.net.InetSocketAddress
@@ -19,152 +18,77 @@ class WorkspaceInitializerTest {
         server?.stop(0)
     }
 
-    // ---- 纯逻辑：computeBringToFront ----
+    // ---- 链路：cookie 握手 → workspace/create ----
 
     @Test
-    fun `computeBringToFront empty order no move`() {
-        assertNull(WorkspaceInitializer.computeBringToFront(emptyList(), "ws-b"))
-    }
-
-    @Test
-    fun `computeBringToFront already first no move`() {
-        assertNull(WorkspaceInitializer.computeBringToFront(listOf("ws-b", "ws-a"), "ws-b"))
-    }
-
-    @Test
-    fun `computeBringToFront target in middle moves before first`() {
-        assertEquals("ws-b" to "ws-a", WorkspaceInitializer.computeBringToFront(listOf("ws-a", "ws-b", "ws-c"), "ws-b"))
-    }
-
-    @Test
-    fun `computeBringToFront target at end moves before first`() {
-        assertEquals("ws-c" to "ws-a", WorkspaceInitializer.computeBringToFront(listOf("ws-a", "ws-b", "ws-c"), "ws-c"))
-    }
-
-    @Test
-    fun `computeBringToFront single element no move`() {
-        assertNull(WorkspaceInitializer.computeBringToFront(listOf("ws-a"), "ws-a"))
-    }
-
-    // ---- 链路：create → list → insertBefore ----
-
-    @Test
-    fun `ensureWorkspace posts workspace create rpc`() {
+    fun `ensureWorkspace posts workspace create rpc with new gateway contract`() {
         var receivedPath: String? = null
         var receivedMethod: String? = null
+        var cookieSeen: String? = null
+        var tokenHandshake = 0
         val srv = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        srv.createContext("/api/workspace.create") { ex ->
+        // Token → cookie handshake (GET /?token=...)
+        srv.createContext("/") { ex ->
+            if (ex.requestMethod == "GET" && ex.requestURI.query?.contains("token=") == true) {
+                tokenHandshake++
+                ex.responseHeaders.set("Set-Cookie", "dsh-auth-test=v1; Path=/; HttpOnly")
+                ex.responseHeaders.set("Location", "/")
+                ex.sendResponseHeaders(303, -1)
+                ex.close()
+                return@createContext
+            }
+            ex.sendResponseHeaders(404, -1)
+            ex.close()
+        }
+        srv.createContext("/api/workspace/create") { ex ->
+            cookieSeen = ex.requestHeaders.getFirst("Cookie")
             val body = ex.requestBody.readBytes().toString(StandardCharsets.UTF_8)
             receivedPath = Regex(""""path":"([^"]+)"""").find(body)?.groupValues?.get(1)
             receivedMethod = Regex(""""method":"([^"]+)"""").find(body)?.groupValues?.get(1)
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"workspace":{"path":"$receivedPath"},"created":true}}}""")
+            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"workspace":{"workspaceId":"ws-1","path":"$receivedPath"},"created":true}}}""")
         }
         srv.executor = Executors.newCachedThreadPool()
         srv.start()
         server = srv
 
-        val ok = WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:${srv.address.port}", "D:/proj/MyApp")
+        val base = "http://127.0.0.1:${srv.address.port}/?token=test-token"
+        val ok = WorkspaceInitializer.ensureWorkspace(base, "D:/proj/MyApp")
         assertTrue(ok, "ensureWorkspace should return true on ok response")
-        assertTrue(receivedMethod == "workspace.create", "should call workspace.create, got $receivedMethod")
+        assertTrue(tokenHandshake == 1, "token handshake should happen once, got $tokenHandshake")
+        assertTrue(cookieSeen?.startsWith("dsh-auth") == true, "create call should carry auth cookie, got $cookieSeen")
+        assertTrue(receivedMethod == "workspace/create", "should call workspace/create, got $receivedMethod")
         assertTrue(receivedPath == "D:/proj/MyApp", "should send project path, got $receivedPath")
-    }
-
-    @Test
-    fun `ensureWorkspace calls insertBefore to move current workspace to front`() {
-        var insertPayload: String? = null
-        var listCalls = 0
-        val srv = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        srv.createContext("/api/workspace.create") { ex ->
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"workspace":{"workspaceId":"ws-b","path":"D:/proj/MyApp"},"created":false}}}""")
-        }
-        srv.createContext("/api/workspace.list") { ex ->
-            listCalls++
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"items":[{"workspaceId":"ws-a","path":"D:/old"},{"workspaceId":"ws-b","path":"D:/proj/MyApp"}],"archivedSessionIds":[]}}}""")
-        }
-        srv.createContext("/api/workspace.insertBefore") { ex ->
-            insertPayload = ex.requestBody.readBytes().toString(StandardCharsets.UTF_8)
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"workspaceIds":["ws-b","ws-a"]}}}""")
-        }
-        srv.executor = Executors.newCachedThreadPool()
-        srv.start()
-        server = srv
-
-        val ok = WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:${srv.address.port}", "D:/proj/MyApp")
-        assertTrue(ok)
-        assertEquals(1, listCalls, "workspace.list should be called once")
-        assertTrue(insertPayload != null, "workspace.insertBefore should be called")
-        assertTrue(insertPayload!!.contains("\"workspaceId\":\"ws-b\""), "insertBefore should target ws-b, got $insertPayload")
-        assertTrue(insertPayload!!.contains("\"beforeWorkspaceId\":\"ws-a\""), "insertBefore should anchor at ws-a, got $insertPayload")
-    }
-
-    @Test
-    fun `ensureWorkspace skips insertBefore when already first`() {
-        var insertCalls = 0
-        val srv = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        srv.createContext("/api/workspace.create") { ex ->
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"workspace":{"workspaceId":"ws-b","path":"D:/proj/MyApp"},"created":false}}}""")
-        }
-        srv.createContext("/api/workspace.list") { ex ->
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"items":[{"workspaceId":"ws-b","path":"D:/proj/MyApp"},{"workspaceId":"ws-a","path":"D:/old"}],"archivedSessionIds":[]}}}""")
-        }
-        srv.createContext("/api/workspace.insertBefore") { ex ->
-            insertCalls++
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"workspaceIds":["ws-b","ws-a"]}}}""")
-        }
-        srv.executor = Executors.newCachedThreadPool()
-        srv.start()
-        server = srv
-
-        val ok = WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:${srv.address.port}", "D:/proj/MyApp")
-        assertTrue(ok)
-        assertEquals(0, insertCalls, "no insertBefore needed when already first")
-    }
-
-    @Test
-    fun `ensureWorkspace tolerates insertBefore failure`() {
-        val srv = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        srv.createContext("/api/workspace.create") { ex ->
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"workspace":{"workspaceId":"ws-b","path":"D:/proj/MyApp"},"created":false}}}""")
-        }
-        srv.createContext("/api/workspace.list") { ex ->
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":true,"value":{"items":[{"workspaceId":"ws-a","path":"D:/old"}],"archivedSessionIds":[]}}}""")
-        }
-        srv.createContext("/api/workspace.insertBefore") { ex ->
-            respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":false,"error":"boom"}}""")
-        }
-        srv.executor = Executors.newCachedThreadPool()
-        srv.start()
-        server = srv
-
-        // create 成功即视为成功；insertBefore 失败仅降级（不阻塞、不抛）
-        val ok = WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:${srv.address.port}", "D:/proj/MyApp")
-        assertTrue(ok)
     }
 
     @Test
     fun `ensureWorkspace returns false on http error`() {
         val srv = HttpServer.create(InetSocketAddress("127.0.0.1", 0), 0)
-        srv.createContext("/api/workspace.create") { ex ->
+        srv.createContext("/") { ex ->
+            ex.responseHeaders.set("Set-Cookie", "dsh-auth-test=v1; Path=/; HttpOnly")
+            ex.sendResponseHeaders(303, -1)
+            ex.close()
+        }
+        srv.createContext("/api/workspace/create") { ex ->
             respond(ex, """{"type":"server-response","rpcId":"x","result":{"ok":false,"error":"boom"}}""")
         }
         srv.start()
         server = srv
-        val ok = WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:${srv.address.port}", "D:/proj")
+        val ok = WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:${srv.address.port}/?token=t", "D:/proj")
         assertTrue(!ok, "should return false on non-ok response")
     }
 
     @Test
     fun `ensureWorkspace returns false on blank path`() {
-        assertTrue(!WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:1", ""))
+        assertTrue(!WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:1/?token=t", ""))
     }
 
     @Test
     fun `ensureWorkspace returns false when unreachable`() {
         // 端口 1 几乎必然拒绝连接；不抛异常，返回 false
-        assertTrue(!WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:1", "D:/proj"))
+        assertTrue(!WorkspaceInitializer.ensureWorkspace("http://127.0.0.1:1/?token=t", "D:/proj"))
     }
 
-    private fun respond(ex: com.sun.net.httpserver.HttpExchange, resp: String) {
+    private fun respond(ex: HttpExchange, resp: String) {
         val bytes = resp.toByteArray(StandardCharsets.UTF_8)
         ex.responseHeaders.set("Content-Type", "application/json")
         ex.sendResponseHeaders(200, bytes.size.toLong())

@@ -44,6 +44,8 @@ class ProcessManager(
         private const val HEALTH_INTERVAL_MS = 500L
         /** Max time to wait for the DSH process to print its web URL before treating it as a failure. */
         private const val PORT_DISCOVERY_TIMEOUT_MS = 30_000L
+        /** How many of the last DSH output lines to retain for crash diagnostics. */
+        private const val MAX_OUTPUT_LINES = 30
     }
 
     private val listeners = CopyOnWriteArrayList<Listener>()
@@ -55,14 +57,17 @@ class ProcessManager(
 
     @Volatile private var process: Process? = null
     @Volatile private var currentState: State = State.STOPPED
-    @Volatile private var webPort: Int? = null
+    @Volatile private var endpoint: WebEndpoint? = null
     @Volatile private var lastFailureReason: String? = null
     private var restartAttempts = 0
     private var portTimeoutFuture: ScheduledFuture<*>? = null
 
+    /** Recent DSH stdout/stderr lines, surfaced when the process dies unexpectedly. */
+    private val recentOutput = java.util.concurrent.ConcurrentLinkedDeque<String>()
+
     fun currentState(): State = currentState
-    fun webPort(): Int? = webPort
-    fun webUrl(): String? = webPort()?.let { "http://${Constants.LOOPBACK_HOST}:$it" }
+    fun webPort(): Int? = endpoint?.port
+    fun webUrl(): String? = endpoint?.url
 
     fun addListener(listener: Listener) {
         listeners.add(listener)
@@ -124,7 +129,8 @@ class ProcessManager(
             return
         }
         process = p
-        webPort = null
+        endpoint = null
+        recentOutput.clear()
         LOG.info("dsh process started pid=${p.pid()} cwd=${workDir.absolutePath} home=$homeDir")
         readAsync(p.inputStream)
         schedulePortDiscoveryTimeout()
@@ -136,22 +142,24 @@ class ProcessManager(
             stream.bufferedReader().useLines { lines ->
                 for (line in lines) {
                     if (line.isBlank()) continue
+                    recentOutput.addLast(line.take(500))
+                    while (recentOutput.size > MAX_OUTPUT_LINES) recentOutput.pollFirst()
                     if (line.contains("dsh web:")) {
                         LOG.info("[dsh] $line")
                     } else {
                         LOG.debug("[dsh] $line")
                     }
-                    PortParser.parsePort(line)?.let { port -> onPortFound(port) }
+                    PortParser.parse(line)?.let { ep -> onEndpointFound(ep) }
                 }
             }
         }
     }
 
-    private fun onPortFound(port: Int) {
-        if (webPort != null || stopRequested.get()) return
-        webPort = port
+    private fun onEndpointFound(ep: WebEndpoint) {
+        if (endpoint != null || stopRequested.get()) return
+        endpoint = ep
         portTimeoutFuture?.cancel(false)
-        executor.execute { waitHealthy(port) }
+        executor.execute { waitHealthy(ep) }
     }
 
     /**
@@ -162,7 +170,7 @@ class ProcessManager(
     private fun schedulePortDiscoveryTimeout() {
         portTimeoutFuture?.cancel(false)
         portTimeoutFuture = executor.schedule({
-            if (stopRequested.get() || webPort != null) return@schedule
+            if (stopRequested.get() || webPort() != null) return@schedule
             if (currentState != State.STARTING) return@schedule
             LOG.warn("dsh did not announce a web port within ${PORT_DISCOVERY_TIMEOUT_MS}ms; killing the process")
             destroyCurrentProcess()
@@ -170,38 +178,43 @@ class ProcessManager(
         }, PORT_DISCOVERY_TIMEOUT_MS, TimeUnit.MILLISECONDS)
     }
 
-    private fun waitHealthy(port: Int) {
-        val url = "http://${Constants.LOOPBACK_HOST}:$port/"
+    private fun waitHealthy(ep: WebEndpoint) {
         repeat(HEALTH_MAX_TRIES) {
             if (stopRequested.get()) return
-            if (isHealthy(url)) {
+            if (isHealthy(ep.url)) {
                 synchronized(this) {
                     restartScheduled.set(false)
                     restartAttempts = 0
                     setState(State.RUNNING)
                 }
-                val webUrl = "http://${Constants.LOOPBACK_HOST}:$port"
-                LOG.info("dsh web ready: $webUrl")
-                listeners.forEach { it.onUrlReady(webUrl) }
+                LOG.info("dsh web ready: ${ep.origin}")
+                listeners.forEach { it.onUrlReady(ep.url) }
                 if (projectPath.isNotBlank()) {
-                    WorkspaceInitializer.ensureWorkspace(webUrl, projectPath)
+                    WorkspaceInitializer.ensureWorkspace(ep.url, projectPath)
                 }
                 return
             }
             try { Thread.sleep(HEALTH_INTERVAL_MS) } catch (_: InterruptedException) { return }
         }
-        LOG.warn("dsh health check timed out on port $port")
+        LOG.warn("dsh health check timed out on port ${ep.port}")
         if (!stopRequested.get()) {
             destroyCurrentProcess()
-            handleStartupFailure("web server did not become healthy on port $port")
+            handleStartupFailure("web server did not become healthy on port ${ep.port}")
         }
     }
 
+    /**
+     * Health probe. The URL carries the per-process `?token=` and DSH answers
+     * 303 (See Other + Set-Cookie) when the token is accepted; redirects must
+     * NOT be followed — the redirected GET has no cookie yet and would 401,
+     * making a perfectly healthy server look down.
+     */
     private fun isHealthy(url: String): Boolean = try {
         val conn = URI(url).toURL().openConnection() as HttpURLConnection
         conn.connectTimeout = 2000
         conn.readTimeout = 2000
         conn.requestMethod = "GET"
+        conn.instanceFollowRedirects = false
         val code = conn.responseCode
         conn.disconnect()
         code in 200..399
@@ -218,6 +231,10 @@ class ProcessManager(
         } else {
             val exitCode = runCatching { p.exitValue() }.getOrNull()
             LOG.warn("dsh process exited unexpectedly pid=${p.pid()} exitCode=$exitCode", err)
+            val tail = recentOutput.toList()
+            if (tail.isNotEmpty()) {
+                LOG.warn("dsh last output before exit:\n${tail.joinToString("\n") { "  [dsh] $it" }}")
+            }
             handleStartupFailure(
                 if (exitCode != null) "dsh process exited with code $exitCode"
                 else "dsh process exited unexpectedly"

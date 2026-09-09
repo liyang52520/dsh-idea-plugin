@@ -49,7 +49,6 @@ import javax.swing.Icon
 import javax.swing.JComponent
 import javax.swing.JOptionPane
 import javax.swing.JPanel
-import javax.swing.JSpinner
 
 /**
  * IDE Settings → Tools → DeepSeek Harness.
@@ -75,7 +74,6 @@ class DshSettingsConfigurable : Configurable {
     private lateinit var nodePathField: TextFieldWithBrowseButton
     private lateinit var dshPathField: TextFieldWithBrowseButton
     private lateinit var dshArgsField: JBTextField
-    private lateinit var maxInstancesSpinner: JSpinner
 
     /** Working copy of custom providers while the settings dialog is open. */
     private val workingProviders = mutableListOf<ProviderConfig>()
@@ -122,13 +120,6 @@ class DshSettingsConfigurable : Configurable {
                 row(I18nBundle.message("settings.card.dshArgs")) {
                     cell(dshArgsField).align(AlignX.FILL)
                 }
-                row(I18nBundle.message("settings.advanced.maxInstances")) {
-                    maxInstancesSpinner = spinner(
-                        SettingsState.MIN_MAX_INSTANCES..SettingsState.MAX_MAX_INSTANCES,
-                    ).component
-                    maxInstancesSpinner.value = state.maxInstances
-                        .coerceIn(SettingsState.MIN_MAX_INSTANCES, SettingsState.MAX_MAX_INSTANCES)
-                }.rowComment(I18nBundle.message("settings.advanced.maxInstances.hint"))
             }
         }
         providersPlaceholder.component = buildProvidersPanel()
@@ -391,7 +382,6 @@ class DshSettingsConfigurable : Configurable {
         if (state.nodePath.orEmpty() != nodePathField.text.trim()) return true
         if (state.dshPath.orEmpty() != dshPathField.text.trim()) return true
         if (state.dshArgs != dshArgsField.text.trim()) return true
-        if (state.maxInstances != maxInstancesSpinner.value) return true
         if (deepSeekKeyChanged) return true
         if (!providersEqual(state.providers, workingProviders)) return true
         return false
@@ -413,9 +403,6 @@ class DshSettingsConfigurable : Configurable {
         state.nodePath = newNodePath.ifEmpty { null }
         state.dshPath = newDshPath.ifEmpty { null }
         state.dshArgs = newDshArgs
-        state.maxInstances = (maxInstancesSpinner.value as? Int)
-            ?.coerceIn(SettingsState.MIN_MAX_INSTANCES, SettingsState.MAX_MAX_INSTANCES)
-            ?: SettingsState.DEFAULT_MAX_INSTANCES
         state.providers.clear()
         state.providers.addAll(newProviders)
         deepSeekKeyChanged = false
@@ -439,8 +426,6 @@ class DshSettingsConfigurable : Configurable {
         nodePathField.text = state.nodePath.orEmpty()
         dshPathField.text = state.dshPath.orEmpty()
         dshArgsField.text = state.dshArgs
-        maxInstancesSpinner.value = state.maxInstances
-            .coerceIn(SettingsState.MIN_MAX_INSTANCES, SettingsState.MAX_MAX_INSTANCES)
         workingProviders.clear()
         workingProviders.addAll(state.providers.map { copyProvider(it) })
         deepSeekKeyChanged = false

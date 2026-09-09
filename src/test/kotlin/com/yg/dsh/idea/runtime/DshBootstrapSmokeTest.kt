@@ -121,7 +121,8 @@ class DshBootstrapSmokeTest {
         assertEquals(ProcessManager.State.RUNNING, manager?.currentState(), "dsh did not reach RUNNING")
         val webUrl = url ?: manager?.webUrl()
         assertTrue(webUrl != null, "web url not discovered")
-        assertEquals(200, httpStatus(webUrl!!), "web ui should answer 200 at $webUrl")
+        // 带 token 的握手 URL 应答 303（Set-Cookie 后重定向）；跟随重定向反而会拿到 401。
+        assertEquals(303, httpStatus(webUrl!!), "token handshake should answer 303 at $webUrl")
 
         // FR-04.2：等待 workspace.create 落地（异步），项目应注册为默认工作区
         val wsFile = home.resolve("storages/workspace.json")
@@ -142,6 +143,7 @@ class DshBootstrapSmokeTest {
         conn.connectTimeout = 5000
         conn.readTimeout = 5000
         conn.requestMethod = "GET"
+        conn.instanceFollowRedirects = false
         try {
             return conn.responseCode
         } finally {

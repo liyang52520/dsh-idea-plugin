@@ -17,13 +17,6 @@ class SettingsState : PersistentStateComponent<SettingsState> {
     var dshPath: String? = null
     var dshArgs: String = ""
 
-    /**
-     * Maximum number of DSH runtimes (one Node.js process + embedded browser
-     * per project) allowed to run concurrently. Clamped to [MIN_MAX_INSTANCES]
-     * … [MAX_MAX_INSTANCES] at use sites.
-     */
-    var maxInstances: Int = DEFAULT_MAX_INSTANCES
-
     override fun getState(): SettingsState = this
 
     override fun loadState(state: SettingsState) {
@@ -35,13 +28,6 @@ class SettingsState : PersistentStateComponent<SettingsState> {
     }
 
     companion object {
-        /** Default concurrency cap when the user has not configured one. */
-        const val DEFAULT_MAX_INSTANCES = 3
-
-        /** Hard bounds for the Advanced-settings spinner. */
-        const val MIN_MAX_INSTANCES = 1
-        const val MAX_MAX_INSTANCES = 10
-
         fun getInstance(): SettingsState =
             ApplicationManager.getApplication().getService(SettingsState::class.java)
     }

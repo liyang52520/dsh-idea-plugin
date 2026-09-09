@@ -185,17 +185,18 @@ class DshMcpEndpointSmokeTest {
 
         val webUrl = waitForDshWeb(dshProc)
         assertNotNull(webUrl, "dsh web should boot with strict mcp patch (failOnStartupError); see process log")
-        assertEquals(200, httpStatus(webUrl!!), "web ui should answer 200 at $webUrl")
+        // 带 token 的握手 URL 应答 303（Set-Cookie 后重定向）；跟随重定向反而会拿到 401。
+        assertEquals(303, httpStatus(webUrl!!), "token handshake should answer 303 at $webUrl")
         assertTrue(toolsListed.get() > 0,
             "dsh mcp-client should sync tools/list at startup (token header accepted)")
     }
 
     // ---- 辅助 ----
 
-    /** 等待 dsh web 端口行（最多 90s），返回 URL 或 null（进程退出也返回 null）。 */
+    /** 等待 dsh web 端口行（最多 90s），返回带 token 的完整 URL 或 null（进程退出也返回 null）。 */
     private fun waitForDshWeb(proc: Process): String? {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90)
-        val re = Regex("""dsh web: http://127\.0\.0\.1:(\d+)""")
+        val re = Regex("""dsh web: (http://127\.0\.0\.1:\d+/\?token=\S+)""")
         val reader = proc.inputStream.bufferedReader()
         val log = StringBuilder()
         while (System.nanoTime() < deadline) {
@@ -207,7 +208,7 @@ class DshMcpEndpointSmokeTest {
             while (reader.ready()) {
                 val line = reader.readLine() ?: return null
                 log.appendLine(line)
-                re.find(line)?.let { return "http://127.0.0.1:${it.groupValues[1]}" }
+                re.find(line)?.let { return it.groupValues[1].trim() }
             }
             Thread.sleep(300)
         }
@@ -236,6 +237,7 @@ class DshMcpEndpointSmokeTest {
         conn.connectTimeout = 5000
         conn.readTimeout = 5000
         conn.requestMethod = "GET"
+        conn.instanceFollowRedirects = false
         try {
             return conn.responseCode
         } finally {

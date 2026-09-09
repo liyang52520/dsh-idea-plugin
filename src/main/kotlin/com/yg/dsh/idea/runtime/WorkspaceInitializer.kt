@@ -2,6 +2,14 @@ package com.yg.dsh.idea.runtime
 
 import com.intellij.openapi.diagnostic.Logger
 
+/**
+ * Registers the current project as a DSH workspace on startup
+ * (workspace/create over the typert gateway RPC).
+ *
+ * Newer DSH builds expose no workspace-list/reorder RPC (workspace order is
+ * projected to clients via the event stream), so registration is the whole
+ * job here: once created, the project shows up in the DSH sidebar.
+ */
 object WorkspaceInitializer {
 
     private val LOG = Logger.getInstance(WorkspaceInitializer::class.java)
@@ -9,16 +17,15 @@ object WorkspaceInitializer {
     fun ensureWorkspace(webUrl: String, projectPath: String): Boolean {
         if (projectPath.isBlank()) return false
         return try {
-            val base = webUrl.trimEnd('/')
             val path = projectPath.replace('\\', '/')
-            val created = DshApiClient.rpc(base, "workspace.create", mapOf("path" to path))
+            val created = DshApiClient.rpc(webUrl, "workspace/create", mapOf("path" to path))
             if (!created.ok) {
-                LOG.warn("workspace.create failed: ${created.errorText}")
+                LOG.warn("workspace/create failed: ${created.errorText}")
                 return false
             }
             val workspaceId = extractWorkspaceId(created.value)
-            if (workspaceId != null) bringToFront(base, workspaceId)
-            LOG.info("workspace.ensureWorkspace ok for $projectPath")
+            val isNew = created.value["created"] == true
+            LOG.info("workspace.ensureWorkspace ok for $projectPath (id=$workspaceId, created=$isNew)")
             true
         } catch (e: Exception) {
             LOG.warn("workspace.ensureWorkspace error for $projectPath", e)
@@ -26,33 +33,6 @@ object WorkspaceInitializer {
         }
     }
 
-    fun computeBringToFront(currentOrder: List<String>, targetId: String): Pair<String, String>? {
-        val first = currentOrder.firstOrNull() ?: return null
-        return if (first == targetId) null else targetId to first
-    }
-
     private fun extractWorkspaceId(value: Map<String, Any?>): String? =
         (value["workspace"] as? Map<*, *>)?.get("workspaceId") as? String
-
-    private fun bringToFront(base: String, workspaceId: String) {
-        val list = DshApiClient.rpc(base, "workspace.list", emptyMap())
-        if (!list.ok) {
-            LOG.warn("workspace.list failed: ${list.errorText}")
-            return
-        }
-        val order = (list.value["items"] as? List<*>)
-            ?.mapNotNull { (it as? Map<*, *>)?.get("workspaceId") as? String }
-            .orEmpty()
-        val move = computeBringToFront(order, workspaceId) ?: return
-        val moved = DshApiClient.rpc(
-            base,
-            "workspace.insertBefore",
-            mapOf("workspaceId" to move.first, "beforeWorkspaceId" to move.second),
-        )
-        if (moved.ok) {
-            LOG.info("workspace $workspaceId moved to front (order=${moved.value["workspaceIds"]})")
-        } else {
-            LOG.warn("workspace.insertBefore failed: ${moved.errorText}")
-        }
-    }
 }

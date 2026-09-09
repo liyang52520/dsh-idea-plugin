@@ -18,11 +18,11 @@ import java.util.concurrent.TimeUnit
 
 /**
  * 集成冒烟（真实 dsh）：一键发送链路——插件不经网页 DOM，直接 POST `/api/` JSON-RPC
- * （session.list/create + session.prompt）。
+ * （session/list + session/create + session/prompt）。
  *
  * 验证：
- * 1. workspace.create/insertBefore（WorkspaceInitializer，RPC 信封重构后）真实可用；
- * 2. sendMessage 在无会话时自动 session.create(cwd)，session.prompt 被 accepted；
+ * 1. workspace/create（WorkspaceInitializer，typert gateway 契约：cookie 认证 + 斜杠路径）真实可用；
+ * 2. sendMessage 在无会话时自动 session/create + session/prompt 被 accepted；
  * 3. 第二次 sendMessage 复用同 cwd 的既有会话（不重复建会话）。
  *
  * prompt 真正跑起来需要可用的 LLM key（本测试用 dummy key，agent 执行会失败），
@@ -98,7 +98,8 @@ class DshSendPromptSmokeTest {
 
         val webUrl = waitForDshWeb(dshProc)
         assertNotNull(webUrl, "dsh web should boot; see process log")
-        assertEquals(200, httpStatus(webUrl!!), "web ui should answer 200 at $webUrl")
+        // 带 token 的握手 URL 应答 303（Set-Cookie 后重定向）；跟随重定向反而会拿到 401。
+        assertEquals(303, httpStatus(webUrl!!), "token handshake should answer 303 at $webUrl")
 
         // 3) 与生产一致：先注册 workspace（ProcessManager 启动后自动做）
         val projectDir = Files.createDirectory(tempDir.resolve("proj-prompt")).toFile().absolutePath
@@ -110,7 +111,7 @@ class DshSendPromptSmokeTest {
         val firstSession = DshApiClient.ensureSession(webUrl, projectDir)
         assertNotNull(firstSession, "session for cwd should exist after sendMessage")
 
-        // 5) 第二次发送：必须复用同一会话（session.list 命中，不重复 create）
+        // 5) 第二次发送：必须复用同一会话（session/list 命中，不重复 create）
         assertTrue(DshApiClient.sendMessage(webUrl, projectDir, "smoke test: follow-up message"),
             "second sendMessage should be accepted")
         val sessionsForCwd = sessionsForCwd(webUrl, projectDir)
@@ -120,19 +121,18 @@ class DshSendPromptSmokeTest {
     // ---- 辅助 ----
 
     private fun sessionsForCwd(base: String, cwd: String): Int {
-        val res = DshApiClient.rpc(base, "session.list", emptyMap())
-        check(res.ok) { "session.list failed: ${res.errorText}" }
+        val res = DshApiClient.rpc(base, "session/list", null)
+        check(res.ok) { "session/list failed: ${res.errorText}" }
         val canonical = File(cwd).canonicalPath
         val items = (res.value["items"] as? List<*>)?.filterIsInstance<Map<*, *>>().orEmpty()
         return items.count { row ->
-            (row["origin"] != "subagent") &&
-                (row["cwd"] as? String)?.let { runCatching { File(it).canonicalPath == canonical }.getOrDefault(false) } == true
+            (row["cwd"] as? String)?.let { runCatching { File(it).canonicalPath == canonical }.getOrDefault(false) } == true
         }
     }
 
     private fun waitForDshWeb(proc: Process): String? {
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(90)
-        val re = Regex("""dsh web: http://127\.0\.0\.1:(\d+)""")
+        val re = Regex("""dsh web: (http://127\.0\.0\.1:\d+/\?token=\S+)""")
         val reader = proc.inputStream.bufferedReader()
         val log = StringBuilder()
         while (System.nanoTime() < deadline) {
@@ -144,7 +144,7 @@ class DshSendPromptSmokeTest {
             while (reader.ready()) {
                 val line = reader.readLine() ?: return null
                 log.appendLine(line)
-                re.find(line)?.let { return "http://127.0.0.1:${it.groupValues[1]}" }
+                re.find(line)?.let { return it.groupValues[1].trim() }
             }
             Thread.sleep(300)
         }
@@ -157,6 +157,7 @@ class DshSendPromptSmokeTest {
         conn.connectTimeout = 5000
         conn.readTimeout = 5000
         conn.requestMethod = "GET"
+        conn.instanceFollowRedirects = false
         try {
             return conn.responseCode
         } finally {

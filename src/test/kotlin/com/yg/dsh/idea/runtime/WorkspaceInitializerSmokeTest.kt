@@ -1,9 +1,7 @@
 package com.yg.dsh.idea.runtime
 
 import com.yg.dsh.idea.runtime.process.ProcessManager
-import com.yg.dsh.idea.util.JsonCodec
 import org.junit.jupiter.api.AfterEach
-import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Assumptions.assumeTrue
 import org.junit.jupiter.api.BeforeEach
@@ -16,9 +14,11 @@ import java.nio.file.Path
 import java.util.concurrent.TimeUnit
 
 /**
- * 集成冒烟（真实 dsh）：验证切换项目场景下工作区顺序修复——
- * `ensureWorkspace` 的 create 幂等不改变顺序，必须经 workspace.insertBefore
- * 把当前项目挪到显示顺序最前（UI 默认落点 = 列表第一个）。
+ * 集成冒烟（真实 dsh）：验证 workspace/create 在新版 typert gateway 契约下
+ * （cookie 认证 + 斜杠路径 + request 信封）可用，且重复注册幂等。
+ *
+ * 新版 DSH 不再暴露 workspace 列表/排序的 unary RPC（顺序经事件流投影），
+ * 因此 ensureWorkspace 的职责就是"确保项目已注册"。
  *
  * 未设置 DSH_IDEA_NODE / DSH_IDEA_DSH 时自动跳过。
  */
@@ -42,7 +42,7 @@ class WorkspaceInitializerSmokeTest {
     }
 
     @Test
-    fun `ensureWorkspace moves current project workspace to front on project switch`() {
+    fun `ensureWorkspace registers projects and is idempotent`() {
         val nodeExe = TestRuntime.nodeExe()!!
         val dshBin = TestRuntime.dshBin()!!
         assertTrue(nodeExe.isFile, "node missing (${TestRuntime.ENV_NODE}): $nodeExe")
@@ -71,20 +71,17 @@ class WorkspaceInitializerSmokeTest {
         }
         val webUrl = waitRunning(url)
 
-        // 模拟项目 A 打开：注册 A
         val dirA = Files.createDirectory(tempDir.resolve("projA")).toFile().absolutePath
         val dirB = Files.createDirectory(tempDir.resolve("projB")).toFile().absolutePath
+
+        // 注册 A / B，重复注册均应成功（幂等）
         assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirA), "register workspace A")
-
-        // 模拟同窗口切换项目 B：注册 B 后 B 应挪到显示顺序最前
         assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirB), "register workspace B")
-        awaitFirstWorkspace(home, dirB)
-        assertEquals(canonical(dirB), firstWorkspacePath(home), "B should be first after switching to B")
+        assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirA), "re-register workspace A (idempotent)")
 
-        // 再切回 A：A 应回到最前（create 幂等 + insertBefore 重新排序）
-        assertTrue(WorkspaceInitializer.ensureWorkspace(webUrl, dirA), "re-register workspace A")
-        awaitFirstWorkspace(home, dirA)
-        assertEquals(canonical(dirA), firstWorkspacePath(home), "A should be first after switching back to A")
+        // 两个项目都应落到 workspace.json
+        awaitWorkspaceRegistered(home, dirA)
+        awaitWorkspaceRegistered(home, dirB)
     }
 
     // ---- helpers ----
@@ -124,31 +121,16 @@ class WorkspaceInitializerSmokeTest {
         }
     }
 
-    /** 等待 workspace.json 出现且第一个 workspace 路径为 [expected]。 */
-    private fun awaitFirstWorkspace(home: Path, expected: String) {
+    /** 等待 workspace.json 出现且包含 [expected] 路径。 */
+    private fun awaitWorkspaceRegistered(home: Path, expected: String) {
         val wsFile = home.resolve("storages/workspace.json")
+        val needle = canonical(expected)
         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20)
         while (System.nanoTime() < deadline) {
-            if (Files.exists(wsFile)) {
-                val path = firstWorkspacePath(home)
-                if (path == canonical(expected)) return
-            }
+            if (Files.exists(wsFile) && Files.readString(wsFile).contains(needle.replace("\\", "\\\\"))) return
             Thread.sleep(300)
         }
-        throw AssertionError("workspace order not updated; file=${Files.exists(wsFile)} expected=$expected")
-    }
-
-    /** 解析 workspace.json：显示顺序第一个 workspace 的 path。 */
-    private fun firstWorkspacePath(home: Path): String? {
-        val wsFile = home.resolve("storages/workspace.json")
-        if (!Files.exists(wsFile)) return null
-        val root = JsonCodec.decodeObject(Files.readString(wsFile))
-        val ids = (root["global"] as? Map<*, *>)?.get("workspaceIds") as? List<*> ?: return null
-        val firstId = ids.firstOrNull() as? String ?: return null
-        val tables = root["tables"] as? Map<*, *>
-        val workspaces = tables?.get("workspaces") as? Map<*, *>
-        val first = workspaces?.get(firstId) as? Map<*, *>
-        return first?.get("path") as? String
+        throw AssertionError("workspace not registered in workspace.json; expected=$needle")
     }
 
     /** 与 dsh 落盘格式一致：realpath 规范化，保留系统分隔符（dsh 存反斜杠，实测）。 */

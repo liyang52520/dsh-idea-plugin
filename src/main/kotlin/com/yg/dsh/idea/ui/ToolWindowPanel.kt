@@ -10,7 +10,6 @@ import com.yg.dsh.idea.runtime.PanelRegistry
 import com.yg.dsh.idea.runtime.RuntimeRegistry
 import com.yg.dsh.idea.runtime.process.ProcessManager
 import com.yg.dsh.idea.settings.DshSettingsConfigurable
-import com.yg.dsh.idea.settings.SettingsState
 import com.yg.dsh.idea.util.Constants
 import com.yg.dsh.idea.util.Notifications
 import com.yg.dsh.idea.util.TextUtils
@@ -127,14 +126,7 @@ class ToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), Di
             return
         }
         if (!starting.compareAndSet(false, true)) return
-        val registry = RuntimeRegistry.getInstance()
-        registry.maxInstances = SettingsState.getInstance().maxInstances
-            .coerceIn(SettingsState.MIN_MAX_INSTANCES, SettingsState.MAX_MAX_INSTANCES)
-        if (!registry.tryAcquire(project.name, this)) {
-            starting.set(false)
-            showError(I18nBundle.message("error.concurrencyLimit", registry.maxInstances))
-            return
-        }
+        RuntimeRegistry.getInstance().register(project.name, this)
         showCard(CARD_LOADING)
         ApplicationManager.getApplication().executeOnPooledThread {
             try {
@@ -151,8 +143,7 @@ class ToolWindowPanel(private val project: Project) : JPanel(BorderLayout()), Di
                 }
             } catch (e: Exception) {
                 LOG.error("failed to bootstrap dsh", e)
-                // 启动失败必须释放并发配额，否则失败的尝试会一直占用实例名额，
-                // 其他项目会被 concurrency limit 拒绝。
+                // 启动失败需注销实例登记，保持运行实例列表与实际状态一致。
                 RuntimeRegistry.getInstance().release(project.name)
                 showError(e.message ?: e.toString())
             } finally {

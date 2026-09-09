@@ -24,7 +24,7 @@
             <li><b>Uses your installed Node.js &amp; DSH</b> — point Settings at your Node.js
             executable and <code>@deepseek-ai/dsh/lib/bin.js</code>. Nothing is bundled inside the
             plugin or downloaded at runtime.</li>
-            <li><b>Multi-project &amp; lifecycle</b> — one instance per project (max 3 concurrent),
+            <li><b>Multi-project &amp; lifecycle</b> — one instance per open project,
             processes are terminated on project close / IDE exit; crash auto-restart with backoff.</li>
             <li><b>Bilingual UI</b> — all plugin UI follows your IDE language (English / 简体中文).</li>
         </ul>
@@ -60,8 +60,8 @@
             还原单个或全部文件、忽略、或重新基线。</li>
             <li><b>使用你已安装的 Node.js 与 DSH</b> — 在设置中填入 Node.js 可执行文件与
             <code>@deepseek-ai/dsh/lib/bin.js</code> 路径即可。插件不内置、也不在运行期下载任何运行时。</li>
-            <li><b>多项目与生命周期</b> — 每项目一个实例（并发上限 3）；项目关闭 / IDE 退出时
-            自动终止进程；崩溃自动退避重启。</li>
+            <li><b>多项目与生命周期</b> — 每个打开的项目各运行一个实例，无并发数量限制；
+            项目关闭 / IDE 退出时自动终止进程；崩溃自动退避重启。</li>
             <li><b>中英双语界面</b> — 插件 UI 跟随 IDE 语言（English / 简体中文）。</li>
         </ul>
 

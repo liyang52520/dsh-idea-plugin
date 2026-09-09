@@ -93,7 +93,7 @@ src/main/kotlin/com/yg/dsh/idea/
 │   ├── DshSessionLauncher.kt     # Bootstrap orchestration: ensureHome → patch → credentials → process; returns DshSession
 │   ├── LegacySessionMigrator.kt  # v0.1.2 → v0.1.3+ session migration (with sentinel)
 │   ├── PanelRegistry.kt          # Project open/close lifecycle + IDE exit cleanup
-│   ├── RuntimeRegistry.kt        # Concurrency guard (max 3 instances per IDE)
+│   ├── RuntimeRegistry.kt        # Live-instance registry per project (no concurrency cap; tracking + cleanup)
 │   ├── WorkspaceInitializer.kt   # Auto-register project as DSH workspace on startup
 │   └── process/        # DSH subprocess management
 │       ├── PortParser.kt             # Parse "dsh web: http://127.0.0.1:<port>" from stdout
@@ -189,8 +189,9 @@ rsvg-convert -w 16 -h 16 icons/deepseek.svg -o icons/deepseek-16.png
 
 1. `DshHomeManager.hasRuntime()` checks that the Node.js + DSH paths configured in Settings
    point at existing files — no provisioning/download (settings-only runtime)
-2. `ToolWindowPanel.start()` acquires a concurrency slot via `RuntimeRegistry.tryAcquire`
-   (max 3 per IDE); **on bootstrap failure the slot is released** (rollback in the catch block)
+2. `ToolWindowPanel.start()` registers the instance via `RuntimeRegistry.register`
+   (no concurrency cap — every open project may run its own DSH); **on bootstrap failure
+   the registration is released** (rollback in the catch block)
 3. `DshSessionLauncher.launch()` runs on a pooled thread, synchronously:
 
    - `DshHomeManager.ensureHome()` (skips `copyGlobalConfigTo` / `syncProviderSettings` /
