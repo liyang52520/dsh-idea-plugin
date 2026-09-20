@@ -83,35 +83,155 @@ object ProviderSettingsWriter {
         }
     }
 
-    private fun writeCredentialsYaml(home: Path, providers: List<ProviderConfig>) {
-        val credFile = home.resolve(Constants.CREDENTIALS_FILE)
+    // region credentials document (version: 1 layout)
+
+    /**
+     * 解析后的凭据文档：
+     * - [refs]：凭据引用（POSIX 标识符 → 密钥），对应 DSH 的 `refs:` 段；
+     * - [recordsBlock]：`records:` 段的原始文本（含段头）。该段由 DSH 自行
+     *   管理（如 browser-session grant），插件任何写入都必须原样保留，
+     *   否则会把网页登录态等记录静默抹掉。
+     */
+    internal data class CredentialDocument(
+        val refs: LinkedHashMap<String, String>,
+        val recordsBlock: String? = null,
+    )
+
+    /**
+     * 解析凭据文件，同时兼容两种历史形态：
+     * 1. 旧版扁平布局：无 `version`，顶层即 `'KEY': 'value' 映射；
+     * 2. 现行 version: 1 布局：`version: 1` + `refs:`（+ `records:`）。
+     *
+     * 逐行解析（不引入 YAML 依赖）：只提取形如 `key: value` 的引用条目，
+     * 无法识别的内容在扁平化时自然丢弃——输出永远是 DSH 可直接读取的干净文档。
+     */
+    internal fun parseCredentialDocument(text: String): CredentialDocument {
+        val lines = text.split("\n")
+        val versioned = lines.any { line ->
+            line.isNotBlank() && !line.startsWith(" ") && !line.startsWith("\t") &&
+                line.substringBefore(':').trim() == "version"
+        }
+        if (!versioned) {
+            val refs = LinkedHashMap<String, String>()
+            for (line in lines) {
+                if (line.isBlank() || line.startsWith(" ") || line.startsWith("\t")) continue
+                val idx = line.indexOf(':')
+                if (idx <= 0) continue
+                val key = unquoteScalar(line.substring(0, idx))
+                val value = unquoteScalar(line.substring(idx + 1))
+                if (key.isNotBlank() && value.isNotEmpty()) refs[key] = value
+            }
+            return CredentialDocument(refs)
+        }
+        val refs = LinkedHashMap<String, String>()
+        val recordsLines = mutableListOf<String>()
+        var section = ""
+        for (line in lines) {
+            val topLevel = line.isNotBlank() && !line.startsWith(" ") && !line.startsWith("\t")
+            if (topLevel) {
+                val header = line.substringBefore(':').trim()
+                section = if (line.trimEnd().endsWith(":")) header else ""
+                if (header == "records" && line.trimEnd().endsWith(":")) recordsLines.add(line)
+                continue
+            }
+            when (section) {
+                "refs" -> {
+                    if (line.isBlank()) continue
+                    val idx = line.indexOf(':')
+                    if (idx > 0) {
+                        val key = unquoteScalar(line.substring(0, idx))
+                        val value = unquoteScalar(line.substring(idx + 1))
+                        if (key.isNotBlank() && value.isNotEmpty()) refs[key] = value
+                    }
+                }
+                "records" -> recordsLines.add(line)
+            }
+        }
+        val recordsBlock = recordsLines.joinToString("\n").trimEnd().ifEmpty { null }
+        return CredentialDocument(refs, recordsBlock)
+    }
+
+    /** 渲染现行 version: 1 布局。输出恒为 DSH 可直接加载的合法文档。 */
+    internal fun renderCredentialDocument(doc: CredentialDocument): String = buildString {
+        appendLine("version: 1")
+        appendLine("refs:")
+        for ((key, value) in doc.refs) {
+            appendLine("  ${yamlScalar(key)}: ${yamlScalar(value)}")
+        }
+        if (doc.recordsBlock != null) {
+            appendLine(doc.recordsBlock)
+        }
+    }
+
+    /**
+     * 在现有凭据文件上执行一次更新并在内容变化时写盘。文件不存在视为空文档；
+     * 写入恒为 version: 1 布局（扁平旧文件借此被原地升级），chmod 600 由
+     * [FileUtils.writeUtf8] 统一处理。
+     *
+     * @return true 表示文件实际发生了变化。
+     */
+    private fun updateCredentialFile(
+        credFile: Path,
+        update: (CredentialDocument) -> CredentialDocument,
+    ): Boolean {
         try {
             Files.createDirectories(credFile.parent)
-            val existing = mutableMapOf<String, String>()
-            if (Files.isRegularFile(credFile)) {
-                Files.readAllLines(credFile).forEach { line ->
-                    val parts = line.split(":", limit = 2)
-                    if (parts.size == 2) {
-                        existing[parts[0].trim()] = unquoteScalar(parts[1])
-                    }
-                }
+            val current = if (Files.isRegularFile(credFile)) {
+                parseCredentialDocument(Files.readString(credFile))
+            } else {
+                CredentialDocument(LinkedHashMap())
             }
-            var changed = false
-            for (p in providers) {
-                if (p.apiKey.isNotEmpty()) {
-                    val envName = p.credentialEnvName
-                    if (existing[envName] != p.apiKey) {
-                        existing[envName] = p.apiKey
-                        changed = true
-                    }
-                }
-            }
-            if (!changed) return
-            val content = existing.entries.joinToString("\n") { "${yamlScalar(it.key)}: ${yamlScalar(it.value)}" } + "\n"
+            val content = renderCredentialDocument(update(current))
+            if (Files.isRegularFile(credFile) && Files.readString(credFile) == content) return false
             FileUtils.writeUtf8(credFile, content)
-            LOG.info("wrote provider credentials to $credFile")
+            return true
         } catch (e: Exception) {
-            LOG.warn("failed to sync provider credentials", e)
+            LOG.warn("failed to update credential file $credFile", e)
+            return false
         }
+    }
+
+    /**
+     * 合并单个凭据引用（其他引用与 records 段原样保留），不存在则新增。
+     * 供 DshHomeManager.syncCredentials 与 CredentialFileWatcher 使用——
+     * 以往两处都用单条目内容整体覆盖文件，会静默吞掉其他 provider 的密钥。
+     */
+    fun mergeCredential(home: Path, refName: String, value: String): Boolean =
+        updateCredentialFile(home.resolve(Constants.CREDENTIALS_FILE)) { doc ->
+            val refs = LinkedHashMap(doc.refs).apply { put(refName, value) }
+            doc.copy(refs = refs)
+        }
+
+    /**
+     * 把全局凭据的 refs 传播到项目 DSH home：
+     * - refs 以全局文件为准（插件设置里的增删改完整跟随）；
+     * - 项目文件的 records 段（browser-session grant 等）原样保留；
+     * - 全局文件不存在时仅原地规范化项目文件（扁平旧布局 → version 1）。
+     */
+    fun propagateCredentials(globalHome: Path, projectHome: Path) {
+        val globalCred = globalHome.resolve(Constants.CREDENTIALS_FILE)
+        val destCred = projectHome.resolve(Constants.CREDENTIALS_FILE)
+        val globalRefs: Map<String, String>? = if (Files.isRegularFile(globalCred)) {
+            parseCredentialDocument(Files.readString(globalCred)).refs
+        } else {
+            null
+        }
+        updateCredentialFile(destCred) { doc ->
+            doc.copy(refs = LinkedHashMap(globalRefs ?: doc.refs))
+        }
+    }
+
+    // endregion
+
+    private fun writeCredentialsYaml(home: Path, providers: List<ProviderConfig>) {
+        val credFile = home.resolve(Constants.CREDENTIALS_FILE)
+        val wrote = updateCredentialFile(credFile) { doc ->
+            val refs = LinkedHashMap(doc.refs)
+            for (p in providers) {
+                if (p.apiKey.isNotEmpty()) refs[p.credentialEnvName] = p.apiKey
+            }
+            doc.copy(refs = refs)
+        }
+        if (wrote) LOG.info("wrote provider credentials to $credFile")
     }
 }

@@ -2,7 +2,6 @@ package com.yg.dsh.idea.config
 
 import com.yg.dsh.idea.util.Constants
 import com.intellij.openapi.diagnostic.Logger
-import java.nio.charset.StandardCharsets
 import java.nio.file.FileSystems
 import java.nio.file.Files
 import java.nio.file.Path
@@ -65,17 +64,9 @@ class CredentialFileWatcher(private val projectCredFile: Path) : AutoCloseable {
         if (projectKey == globalKey) return
 
         Credentials.writeApiKey(projectKey)
-        writeGlobalCredential(globalCred, projectKey)
+        // 只合并 DEEPSEEK_API_KEY 这一条；以往整文件覆盖会吞掉其他 provider 的密钥。
+        ProviderSettingsWriter.mergeCredential(globalCred.parent, Constants.DEEPSEEK_API_KEY, projectKey)
         LOG.info("dsh Web UI updated API key; synced to global (PasswordSafe + ${globalCred.fileName})")
-    }
-
-    private fun writeGlobalCredential(globalCred: Path, key: String) {
-        try {
-            Files.createDirectories(globalCred.parent)
-            Files.writeString(globalCred, "${Constants.DEEPSEEK_API_KEY}: $key\n", StandardCharsets.UTF_8)
-        } catch (e: Exception) {
-            LOG.warn("failed to write global credential $globalCred", e)
-        }
     }
 
     internal fun resolveSync(projectKey: String?, globalKey: String?): String? =

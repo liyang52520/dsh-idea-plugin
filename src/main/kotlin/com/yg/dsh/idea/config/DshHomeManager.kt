@@ -123,17 +123,17 @@ class DshHomeManager : Disposable {
 
     private fun copyGlobalConfigTo(home: Path) {
         val g = globalConfigHome()
-        for (name in listOf(Constants.CREDENTIALS_FILE, "settings.yaml")) {
-            val src = g.resolve(name)
-            if (!Files.exists(src)) continue
-            val dest = home.resolve(name)
-            if (Files.exists(dest) && Files.readString(dest) == Files.readString(src)) continue
-            Files.createDirectories(home)
-            Files.copy(src, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
-            if (name == Constants.CREDENTIALS_FILE) {
-                FileUtils.chmod600(dest)
+        val settingsSrc = g.resolve("settings.yaml")
+        if (Files.exists(settingsSrc)) {
+            val dest = home.resolve("settings.yaml")
+            if (!Files.exists(dest) || Files.readString(dest) != Files.readString(settingsSrc)) {
+                Files.createDirectories(home)
+                Files.copy(settingsSrc, dest, java.nio.file.StandardCopyOption.REPLACE_EXISTING)
             }
         }
+        // 凭据不能整文件复制：项目文件的 records 段（browser-session grant 等）
+        // 由 DSH 自行维护，整文件覆盖会把它抹掉；同时扁平旧文件在此被规范化。
+        ProviderSettingsWriter.propagateCredentials(g, home)
     }
 
     private fun prefillAcknowledgeWelcomeNotice() {
@@ -147,21 +147,14 @@ class DshHomeManager : Disposable {
         LOG.info("prefilled settings.yaml welcomeNoticeVersion=$WELCOME_NOTICE_VERSION locale=$DSH_LOCALE")
     }
 
+    /**
+     * 把 PasswordSafe 中的 DeepSeek 密钥合并进全局凭据文件（只更新
+     * DEEPSEEK_API_KEY 这一条，其他 provider 的密钥与 records 段保留）。
+     * @return true 表示文件实际发生了变化。
+     */
     fun syncCredentials(): Boolean {
         val key = Credentials.readApiKey() ?: return false
-        val credFile = globalConfigHome().resolve(Constants.CREDENTIALS_FILE)
-        val content = "${Constants.DEEPSEEK_API_KEY}: $key\n"
-        return try {
-            if (!Files.exists(credFile) || Files.readString(credFile) != content) {
-                FileUtils.writeUtf8(credFile, content)
-                true
-            } else {
-                false
-            }
-        } catch (e: Exception) {
-            LOG.warn("failed to sync credentials to DSH_HOME", e)
-            false
-        }
+        return ProviderSettingsWriter.mergeCredential(globalConfigHome(), Constants.DEEPSEEK_API_KEY, key)
     }
 
     fun syncProviderSettings() {

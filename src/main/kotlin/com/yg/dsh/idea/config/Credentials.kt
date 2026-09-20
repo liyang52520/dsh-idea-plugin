@@ -20,16 +20,23 @@ object Credentials {
 
     fun writeApiKey(key: String) = passwordSafe().setPassword(ATTRIBUTES, key)
 
+    /**
+     * 从凭据文件读取 DeepSeek 密钥，同时兼容两种布局：
+     * 旧版扁平文件（顶层 `DEEPSEEK_API_KEY: ...`）与现行 version: 1 文件
+     * （`refs:` 段内 `  'DEEPSEEK_API_KEY': '...'`）。records 段内不会出现
+     * 同名键，无需额外分段判断。
+     */
     fun readApiKeyFromCredentialFile(file: Path): String? {
         if (!Files.isReadable(file)) return null
         return Files.readAllLines(file).asSequence()
-            .map { it.trim() }
-            .filter { it.startsWith(DEEPSEEK_API_KEY) }
             .mapNotNull { line ->
                 val idx = line.indexOf(':')
-                if (idx < 0) null else line.substring(idx + 1).trim().trim('"').trim('\'')
+                if (idx <= 0) return@mapNotNull null
+                val name = line.substring(0, idx).trim().trim('\'', '"')
+                if (name != DEEPSEEK_API_KEY) return@mapNotNull null
+                line.substring(idx + 1).trim().trim('\'', '"').takeIf { it.isNotEmpty() }
             }
-            .firstOrNull { it.isNotEmpty() }
+            .firstOrNull()
     }
 
     fun readApiKeyWithFallback(credentialFile: Path?): String? =
